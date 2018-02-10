@@ -1,4 +1,9 @@
 .idea
 target
+
+project/.boot/
+project/.ivy/
+project/.sbtboot/
+
 *.swp
 .DS_Store

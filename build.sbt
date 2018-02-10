@@ -23,13 +23,13 @@ val breezeVersion = "0.13.1"
 val circeVersion = "0.8.0"
 val commonsMathVersion = "3.6.1"
 val flinkVersion = "1.4.0"
-val hadoopVersion = "2.8.0"
+val hadoopVersion = "3.0.0"
 val scalacheckVersion = "1.13.5"
 val scalatestVersion = "3.0.4"
 val scaldingVersion = "0.17.3"
 val scioVersion = "0.4.6"
 val sparkVersion = "2.2.1"
-val tensorflowVersion = "1.4.0"
+val tensorflowVersion = "1.6.0-rc0"
 
 val commonSettings = Seq(
   organization := "com.spotify",
