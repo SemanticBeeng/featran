@@ -17,28 +17,54 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.{FeatureBuilder, FeatureRejection}
+import com.spotify.featran.{FeatureBuilder, FeatureRejection, FlatReader, FlatWriter}
 
-import scala.collection.mutable.{Set => MSet}
 import scala.collection.SortedMap
+import scala.collection.mutable.{Set => MSet}
 
 /**
  * Transform a collection of categorical features to binary columns, with at most N one-values.
  *
- * Missing values are transformed to zero vectors.
+ * Missing values are either transformed to zero vectors or encoded as a missing value.
  *
- * When using aggregated feature summary from a previous session, unseen labels are ignored and
- * [[FeatureRejection.Unseen]] rejections are reported.
+ * When using aggregated feature summary from a previous session, unseen labels are either
+ * transformed to zero vectors or encoded as `__unknown__` (if `encodeMissingValue` is true) and
+ * [FeatureRejection.Unseen]] rejections are reported.
  */
-object NHotEncoder {
+object NHotEncoder extends SettingsBuilder {
+
   /**
    * Create a new [[NHotEncoder]] instance.
    */
-  def apply(name: String): Transformer[Seq[String], Set[String], SortedMap[String, Int]] =
-    new NHotEncoder(name)
+  def apply(name: String, encodeMissingValue: Boolean = false)
+    : Transformer[Seq[String], Set[String], SortedMap[String, Int]] =
+    new NHotEncoder(name, encodeMissingValue)
+
+  /**
+   * Create a new [[NHotEncoder]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(
+    setting: Settings): Transformer[Seq[String], Set[String], SortedMap[String, Int]] = {
+    val encodeMissingValue = setting.params("encodeMissingValue").toBoolean
+    NHotEncoder(setting.name, encodeMissingValue)
+  }
 }
 
-private class NHotEncoder(name: String) extends BaseHotEncoder[Seq[String]](name) {
+private[featran] class NHotEncoder(name: String, encodeMissingValue: Boolean)
+    extends BaseHotEncoder[Seq[String]](name, encodeMissingValue) {
+
+  import MissingValue.MissingValueToken
+
+  def addMissingValue(fb: FeatureBuilder[_], unseen: MSet[String], keys: Seq[String]): Unit = {
+    if (unseen.isEmpty
+        && keys.nonEmpty) {
+      fb.skip()
+    } else {
+      fb.add(name + '_' + MissingValueToken, 1.0)
+    }
+  }
+
   override def prepare(a: Seq[String]): Set[String] = Set(a: _*)
   override def buildFeatures(a: Option[Seq[String]],
                              c: SortedMap[String, Int],
@@ -46,7 +72,7 @@ private class NHotEncoder(name: String) extends BaseHotEncoder[Seq[String]](name
     case Some(xs) =>
       val keys = xs.distinct.sorted
       var prev = -1
-      val totalSeen = MSet[String]()
+      val unseen = MSet[String]()
       keys.foreach { key =>
         c.get(key) match {
           case Some(curr) =>
@@ -54,17 +80,22 @@ private class NHotEncoder(name: String) extends BaseHotEncoder[Seq[String]](name
             if (gap > 0) fb.skip(gap)
             fb.add(name + '_' + key, 1.0)
             prev = curr
-            totalSeen += key
           case None =>
+            unseen += key
         }
       }
       val gap = c.size - prev - 1
       if (gap > 0) fb.skip(gap)
-
-      if (totalSeen.size != keys.size) {
-        val unseen = keys.toSet -- totalSeen
-        fb.reject(this, FeatureRejection.Unseen(unseen))
+      if (encodeMissingValue) {
+        addMissingValue(fb, unseen, keys)
       }
-    case None => fb.skip(c.size)
+      if (unseen.nonEmpty) {
+        fb.reject(this, FeatureRejection.Unseen(unseen.toSet))
+      }
+    case None => addMissingItem(c, fb)
   }
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readStrings(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Seq[String]] => fw.IF =
+    fw.writeStrings(name)
 }

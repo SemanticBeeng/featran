@@ -17,7 +17,7 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
 import com.twitter.algebird.HLL
 
 import scala.collection.JavaConverters._
@@ -53,7 +53,8 @@ import scala.collection.JavaConverters._
  *              4096      0.0071%
  * }}}
  */
-object HashNHotWeightedEncoder {
+object HashNHotWeightedEncoder extends SettingsBuilder {
+
   /**
    * Create a new [[HashNHotWeightedEncoder]] instance.
    * @param hashBucketSize number of buckets, or 0 to infer from data with HyperLogLog
@@ -63,20 +64,31 @@ object HashNHotWeightedEncoder {
             hashBucketSize: Int = 0,
             sizeScalingFactor: Double = 8.0): Transformer[Seq[WeightedLabel], HLL, Int] =
     new HashNHotWeightedEncoder(name, hashBucketSize, sizeScalingFactor)
+
+  /**
+   * Create a new [[HashOneHotEncoder]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Seq[WeightedLabel], HLL, Int] = {
+    val hashBucketSize = setting.params("hashBucketSize").toInt
+    val sizeScalingFactor = setting.params("sizeScalingFactor").toDouble
+    HashNHotWeightedEncoder(setting.name, hashBucketSize, sizeScalingFactor)
+  }
 }
 
-private class HashNHotWeightedEncoder(name: String, hashBucketSize: Int, sizeScalingFactor: Double)
-  extends BaseHashHotEncoder[Seq[WeightedLabel]](name, hashBucketSize, sizeScalingFactor) {
+private[featran] class HashNHotWeightedEncoder(name: String,
+                                               hashBucketSize: Int,
+                                               sizeScalingFactor: Double)
+    extends BaseHashHotEncoder[Seq[WeightedLabel]](name, hashBucketSize, sizeScalingFactor) {
 
   override def prepare(a: Seq[WeightedLabel]): HLL =
     a.map(_.name).map(hllMonoid.toHLL(_)).reduce(hllMonoid.plus)
 
-  override def buildFeatures(a: Option[Seq[WeightedLabel]],
-                             c: Int,
-                             fb: FeatureBuilder[_]): Unit = {
+  override def buildFeatures(a: Option[Seq[WeightedLabel]], c: Int, fb: FeatureBuilder[_]): Unit = {
     a match {
       case Some(xs) =>
-        val weights = new java.util.TreeMap[Int,Double]().asScala.withDefaultValue(0.0)
+        val weights =
+          new java.util.TreeMap[Int, Double]().asScala.withDefaultValue(0.0)
         xs.foreach(x => weights(HashEncoder.bucket(x.name, c)) += x.value)
         var prev = -1
         weights.foreach { v =>
@@ -91,4 +103,8 @@ private class HashNHotWeightedEncoder(name: String, hashBucketSize: Int, sizeSca
       case None => fb.skip(c)
     }
   }
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readWeightedLabel(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Seq[WeightedLabel]] => fw.IF =
+    fw.writeWeightedLabel(name)
 }

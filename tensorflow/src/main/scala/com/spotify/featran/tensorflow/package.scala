@@ -17,24 +17,165 @@
 
 package com.spotify.featran
 
+import org.tensorflow.example.{Example, Features}
 import org.tensorflow.{example => tf}
+import _root_.java.util.regex.Pattern
+
+import com.spotify.featran.transformers.{MDLRecord, WeightedLabel}
+import shapeless.datatype.tensorflow.TensorFlowType
+
+case class NamedTFFeature(name: String, f: tf.Feature)
 
 package object tensorflow {
+  private val FeatureNameNormalization = Pattern.compile("[^A-Za-z0-9_]")
+
+  final case class TensorFlowFeatureBuilder(
+    @transient private var underlying: Features.Builder = tf.Features.newBuilder())
+      extends FeatureBuilder[tf.Example] {
+    override def init(dimension: Int): Unit = {
+      if (underlying == null) {
+        underlying = tf.Features.newBuilder()
+      }
+      underlying.clear()
+    }
+    override def add(name: String, value: Double): Unit = {
+      val feature = tf.Feature
+        .newBuilder()
+        .setFloatList(tf.FloatList.newBuilder().addValue(value.toFloat))
+        .build()
+      val normalized = FeatureNameNormalization.matcher(name).replaceAll("_")
+      underlying.putFeature(normalized, feature)
+    }
+    override def skip(): Unit = Unit
+    override def skip(n: Int): Unit = Unit
+    override def result: tf.Example =
+      tf.Example.newBuilder().setFeatures(underlying).build()
+
+    override def newBuilder: FeatureBuilder[Example] = TensorFlowFeatureBuilder()
+  }
+
+  implicit val exampleFlatReader: FlatReader[Example] = new FlatReader[tf.Example] {
+    import TensorFlowType._
+
+    def toFeature(name: String, ex: Example): Option[tf.Feature] = {
+      val fm = ex.getFeatures.getFeatureMap
+      if (fm.containsKey(name)) {
+        Some(fm.get(name))
+      } else {
+        None
+      }
+    }
+
+    def readDouble(name: String): Example => Option[Double] =
+      (ex: Example) => toFeature(name, ex).flatMap(v => toDoubles(v).headOption)
+
+    def readMdlRecord(name: String): Example => Option[MDLRecord[String]] =
+      (ex: Example) => {
+        for {
+          labelFeature <- toFeature(name + "_label", ex)
+          label <- toStrings(labelFeature).headOption
+          valueFeature <- toFeature(name + "_value", ex)
+          value <- toDoubles(valueFeature).headOption
+        } yield MDLRecord(label, value)
+      }
+
+    def readWeightedLabel(name: String): Example => Option[List[WeightedLabel]] =
+      (ex: Example) => {
+        val labels = for {
+          keyFeature <- toFeature(name + "_key", ex).toList
+          key <- toStrings(keyFeature)
+          valueFeature <- toFeature(name + "_value", ex).toList
+          value <- toDoubles(valueFeature)
+        } yield WeightedLabel(key, value)
+        if (labels.isEmpty) None else Some(labels)
+      }
+
+    def readDoubles(name: String): Example => Option[Seq[Double]] =
+      (ex: Example) => toFeature(name, ex).map(v => toDoubles(v))
+
+    def readDoubleArray(name: String): Example => Option[Array[Double]] =
+      (ex: Example) => toFeature(name, ex).map(v => toDoubles(v).toArray)
+
+    def readString(name: String): Example => Option[String] =
+      (ex: Example) => toFeature(name, ex).flatMap(v => toStrings(v).headOption)
+
+    def readStrings(name: String): Example => Option[Seq[String]] =
+      (ex: Example) => toFeature(name, ex).map(v => toStrings(v))
+  }
+
+  implicit val exampleFlatWriter: FlatWriter[Example] = new FlatWriter[tf.Example] {
+    import TensorFlowType._
+    type IF = List[NamedTFFeature]
+
+    override def writeDouble(name: String): Option[Double] => List[NamedTFFeature] =
+      (v: Option[Double]) => v.toList.map(r => NamedTFFeature(name, fromDoubles(Seq(r)).build()))
+
+    override def writeMdlRecord(name: String): Option[MDLRecord[String]] => List[NamedTFFeature] =
+      (v: Option[MDLRecord[String]]) => {
+        v.toList.flatMap { values =>
+          List(
+            NamedTFFeature(name + "_label", fromStrings(Seq(values.label.toString)).build()),
+            NamedTFFeature(name + "_value", fromDoubles(Seq(values.value)).build())
+          )
+        }
+      }
+
+    override def writeWeightedLabel(n: String): Option[Seq[WeightedLabel]] => List[NamedTFFeature] =
+      (v: Option[Seq[WeightedLabel]]) => {
+        v.toList.flatMap { values =>
+          List(
+            NamedTFFeature(n + "_key", fromStrings(values.map(_.name)).build()),
+            NamedTFFeature(n + "_value", fromDoubles(values.map(_.value)).build())
+          )
+        }
+      }
+
+    override def writeDoubles(name: String): Option[Seq[Double]] => List[NamedTFFeature] =
+      (v: Option[Seq[Double]]) => {
+        v.toList.flatMap { values =>
+          List(NamedTFFeature(name, fromDoubles(values).build()))
+        }
+      }
+
+    override def writeDoubleArray(name: String): Option[Array[Double]] => List[NamedTFFeature] =
+      (v: Option[Array[Double]]) => {
+        v.toList.flatMap { values =>
+          List(NamedTFFeature(name, fromDoubles(values).build()))
+        }
+      }
+
+    override def writeString(name: String): Option[String] => List[NamedTFFeature] =
+      (v: Option[String]) => {
+        v.toList.flatMap { values =>
+          List(NamedTFFeature(name, fromStrings(Seq(values)).build()))
+        }
+      }
+
+    override def writeStrings(name: String): Option[Seq[String]] => List[NamedTFFeature] =
+      (v: Option[Seq[String]]) => {
+        v.toList.flatMap { values =>
+          List(NamedTFFeature(name, fromStrings(values).build()))
+        }
+      }
+
+    override def writer: Seq[List[NamedTFFeature]] => Example =
+      (fns: Seq[List[NamedTFFeature]]) => {
+        val builder = Features.newBuilder()
+        fns.foreach { f =>
+          f.foreach { nf =>
+            val normalized_name = FeatureNameNormalization.matcher(nf.name).replaceAll("_")
+            builder.putFeature(normalized_name, nf.f)
+          }
+        }
+        Example
+          .newBuilder()
+          .setFeatures(builder.build())
+          .build()
+      }
+  }
+
   /**
    * [[FeatureBuilder]] for output as TensorFlow `Example` type.
    */
-  implicit def tensorFlowFeatureBuilder
-  : FeatureBuilder[tf.Example] = new FeatureBuilder[tf.Example] {
-    @transient private lazy val fb = tf.Features.newBuilder()
-    override def init(dimension: Int): Unit = fb.clear()
-    override def add(name: String, value: Double): Unit =
-      fb.putFeature(
-        name,
-        tf.Feature.newBuilder()
-          .setFloatList(tf.FloatList.newBuilder().addValue(value.toFloat))
-          .build())
-    override def skip(): Unit = Unit
-    override def skip(n: Int): Unit = Unit
-    override def result: tf.Example = tf.Example.newBuilder().setFeatures(fb).build()
-  }
+  implicit def tensorFlowFeatureBuilder: FeatureBuilder[tf.Example] = TensorFlowFeatureBuilder()
 }

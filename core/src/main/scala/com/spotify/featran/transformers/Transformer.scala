@@ -17,10 +17,12 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
 import com.twitter.algebird.{Aggregator, Semigroup}
 
-import scala.language.higherKinds
+trait SettingsBuilder {
+  def fromSettings(settings: Settings): Transformer[_, _, _]
+}
 
 // TODO: port more transformers from Spark
 // https://spark.apache.org/docs/2.1.0/ml-features.html
@@ -74,18 +76,29 @@ abstract class Transformer[-A, B, C](val name: String) extends Serializable {
 
   def optFeatureDimension(c: Option[C]): Int = c match {
     case Some(x) => featureDimension(x)
-    case None => 1
+    case None    => 1
   }
 
   def optFeatureNames(c: Option[C]): Seq[String] = c match {
     case Some(x) => featureNames(x)
-    case None => Seq(name)
+    case None    => Seq(name)
   }
 
   def optBuildFeatures(a: Option[A], c: Option[C], fb: FeatureBuilder[_]): Unit = c match {
     case Some(x) => buildFeatures(a, x, fb)
-    case None => fb.skip()
+    case None    => fb.skip()
   }
+
+  def unsafeBuildFeatures(a: Option[Any], c: Option[Any], fb: FeatureBuilder[_]): Unit =
+    optBuildFeatures(a.asInstanceOf[Option[A]], c.asInstanceOf[Option[C]], fb)
+
+  def unsafeFeatureDimension(c: Option[Any]): Int =
+    optFeatureDimension(c.asInstanceOf[Option[C]])
+
+  def flatRead[T: FlatReader]: T => Option[Any]
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[A] => fw.IF
+  def unsafeFlatWriter[T](implicit fw: FlatWriter[T]): Option[Any] => fw.IF =
+    (o: Option[Any]) => flatWriter.apply(o.asInstanceOf[Option[A]]).asInstanceOf[fw.IF]
 
   //================================================================================
   // Transformer parameter and aggregator persistence
@@ -111,25 +124,32 @@ abstract class Transformer[-A, B, C](val name: String) extends Serializable {
    * @param c aggregator summary
    */
   def settings(c: Option[C]): Settings =
-    Settings(
-      this.getClass.getCanonicalName, name, params, optFeatureNames(c), c.map(encodeAggregator))
+    Settings(this.getClass.getCanonicalName,
+             name,
+             params,
+             optFeatureNames(c),
+             c.map(encodeAggregator))
 
 }
 
-case class Settings(cls: String, name: String, params: Map[String, String],
-                    featureNames: Seq[String], aggregators: Option[String])
+case class Settings(cls: String,
+                    name: String,
+                    params: Map[String, String],
+                    featureNames: Seq[String],
+                    aggregators: Option[String])
 
-private abstract class OneDimensional[A, B, C](name: String) extends Transformer[A, B, C](name) {
+private[featran] abstract class OneDimensional[A, B, C](name: String)
+    extends Transformer[A, B, C](name) {
   override def featureDimension(c: C): Int = 1
   override def featureNames(c: C): Seq[String] = Seq(name)
 }
 
-private abstract class MapOne[A](name: String)
-  extends OneDimensional[A, Unit, Unit](name) {
+private[featran] abstract class MapOne[A](name: String)
+    extends OneDimensional[A, Unit, Unit](name) {
   override val aggregator: Aggregator[A, Unit, Unit] = Aggregators.unit[A]
   override def buildFeatures(a: Option[A], c: Unit, fb: FeatureBuilder[_]): Unit = a match {
     case Some(x) => fb.add(name, map(x))
-    case None => fb.add(name, 0.0)
+    case None    => fb.add(name, 0.0)
   }
   def map(a: A): Double
   override def encodeAggregator(c: Unit): String = ""
@@ -141,7 +161,8 @@ private object Aggregators {
 
   def from[A]: From[A] = new From[A]
   class From[A] extends Serializable {
-    def apply[B: Semigroup](f: A => B): FromSemigroup[A, B] = new FromSemigroup[A, B](f)
+    def apply[B: Semigroup](f: A => B): FromSemigroup[A, B] =
+      new FromSemigroup[A, B](f)
   }
   class FromSemigroup[A, B: Semigroup](f: A => B) extends Serializable {
     def to[C](g: B => C): Aggregator[A, B, C] = new Aggregator[A, B, C] {
@@ -151,21 +172,21 @@ private object Aggregators {
     }
   }
 
-  def seqLength[T, M[_]](expectedLength: Int = 0)(implicit ev: M[T] => Seq[T])
-  : Aggregator[M[T], Int, Int] = new Aggregator[M[T], Int, Int] {
-    override def prepare(input: M[T]): Int = {
-      if (expectedLength > 0) {
-        require(
-          input.length == expectedLength,
-          s"Invalid input length, expected: $expectedLength, actual: ${input.length}")
+  def seqLength[T, M[_]](expectedLength: Int = 0)(
+    implicit ev: M[T] => Seq[T]): Aggregator[M[T], Int, Int] =
+    new Aggregator[M[T], Int, Int] {
+      override def prepare(input: M[T]): Int = {
+        if (expectedLength > 0) {
+          require(input.length == expectedLength,
+                  s"Invalid input length, expected: $expectedLength, actual: ${input.length}")
+        }
+        input.length
       }
-      input.length
+      override def semigroup: Semigroup[Int] = Semigroup.from { (x, y) =>
+        require(x == y, s"Different input lengths, $x != $y")
+        x
+      }
+      override def present(reduction: Int): Int = reduction
     }
-    override def semigroup: Semigroup[Int] = Semigroup.from { (x, y) =>
-      require(x == y, s"Different input lengths, $x != $y")
-      x
-    }
-    override def present(reduction: Int): Int = reduction
-  }
 
 }

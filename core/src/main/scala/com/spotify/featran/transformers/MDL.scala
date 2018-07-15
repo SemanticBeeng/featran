@@ -19,7 +19,8 @@ package com.spotify.featran.transformers
 
 import java.util.{TreeMap => JTreeMap}
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
+import com.spotify.featran.transformers.MinMaxScaler.C
 import com.spotify.featran.transformers.mdl.MDLPDiscretizer
 import com.spotify.featran.transformers.mdl.MDLPDiscretizer._
 import com.twitter.algebird._
@@ -50,7 +51,8 @@ case class MDLRecord[T](label: T, value: Double)
  *
  * - https://github.com/sramirez/spark-MDLP-discretization
  */
-object MDL {
+object MDL extends SettingsBuilder {
+
   /**
    * Create an MDL Instance.
    *
@@ -62,21 +64,37 @@ object MDL {
    */
   def apply[T: ClassTag](name: String,
                          sampleRate: Double = 1.0,
-                         stoppingCriterion: Double = DEFAULT_STOPPING_CRITERION,
-                         minBinPercentage: Double = DEFAULT_MIN_BIN_PERCENTAGE,
-                         maxBins: Int = DEFAULT_MAX_BINS,
-                         seed: Int = Random.nextInt())
-  : Transformer[MDLRecord[T], B[T], C] =
+                         stoppingCriterion: Double = DefaultStoppingCriterion,
+                         minBinPercentage: Double = DefaultMinBinPercentage,
+                         maxBins: Int = DefaultMaxBins,
+                         seed: Int = Random.nextInt()): Transformer[MDLRecord[T], B[T], C] =
     new MDL(name, sampleRate, stoppingCriterion, minBinPercentage, maxBins, seed)
+
+  /**
+   * Create a new [[MDL]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[MDLRecord[String], B[String], C] = {
+    val sampleRate = setting.params("sampleRate").toDouble
+    val stoppingCriterion = setting.params("stoppingCriterion").toDouble
+    val minBinPercentage = setting.params("minBinPercentage").toDouble
+    val maxBins = setting.params("maxBins").toInt
+    val seed = setting.params("seed").toInt
+    MDL[String](setting.name, sampleRate, stoppingCriterion, minBinPercentage, maxBins, seed)
+  }
 
   // Use WrappedArray to workaround Beam immutability enforcement
   private type B[T] = mutable.WrappedArray[MDLRecord[T]]
   private type C = JTreeMap[Double, Int]
 }
 
-private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppingCriterion: Double,
-                               val minBinPercentage: Double, val maxBins: Int, val seed: Int)
-  extends Transformer[MDLRecord[T], MDL.B[T], MDL.C](name) {
+private[featran] class MDL[T: ClassTag](name: String,
+                                        val sampleRate: Double,
+                                        val stoppingCriterion: Double,
+                                        val minBinPercentage: Double,
+                                        val maxBins: Int,
+                                        val seed: Int)
+    extends Transformer[MDLRecord[T], MDL.B[T], MDL.C](name) {
   checkRange("sampleRate", sampleRate, 0.0, 1.0)
   require(stoppingCriterion >= 0, "stoppingCriterion must be > 0")
   checkRange("minBinPercentage", minBinPercentage, 0.0, 1.0)
@@ -84,7 +102,7 @@ private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppin
 
   import MDL.{B, C}
 
-  private lazy val rng = {
+  @transient private lazy val rng = {
     val r = new Random(seed)
     r.nextDouble()
     r
@@ -93,7 +111,7 @@ private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppin
   override def featureDimension(c: C): Int = c.size()
   override def featureNames(c: C): Seq[String] = names(c.size())
 
-  def buildFeatures(a: Option[MDLRecord[T]], c: C, fb: FeatureBuilder[_]) {
+  def buildFeatures(a: Option[MDLRecord[T]], c: C, fb: FeatureBuilder[_]): Unit = {
     a match {
       case Some(x) =>
         val e = c.higherEntry(x.value)
@@ -108,8 +126,8 @@ private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppin
   override val aggregator: Aggregator[MDLRecord[T], B[T], C] =
     new Aggregator[MDLRecord[T], B[T], C] {
       override def prepare(input: MDLRecord[T]): B[T] =
-        mutable.WrappedArray.make[MDLRecord[T]](
-          if (rng.nextDouble() < sampleRate) Array(input) else Array.empty[T])
+        mutable.WrappedArray
+          .make[MDLRecord[T]](if (rng.nextDouble() < sampleRate) Array(input) else Array.empty[T])
 
       override def semigroup: Semigroup[B[T]] = new Semigroup[B[T]] {
         override def plus(x: B[T], y: B[T]): B[T] = x ++ y
@@ -123,10 +141,7 @@ private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppin
         ).discretize(maxBins)
 
         val m = new C()
-        ranges
-          .tail
-          .zipWithIndex
-          .map{case(v, i) => m.put(v, i)}
+        ranges.tail.zipWithIndex.map { case (v, i) => m.put(v, i) }
 
         m
       }
@@ -144,10 +159,17 @@ private class MDL[T: ClassTag](name: String, val sampleRate: Double, val stoppin
     m
   }
 
-  override def params: Map[String, String] = Map(
-    "sampleRate" -> sampleRate.toString,
-    "stoppingCriterion" -> stoppingCriterion.toString,
-    "minBinPercentage" -> minBinPercentage.toString,
-    "maxBins" -> maxBins.toString,
-    "seed" -> seed.toString)
+  override def params: Map[String, String] =
+    Map(
+      "sampleRate" -> sampleRate.toString,
+      "stoppingCriterion" -> stoppingCriterion.toString,
+      "minBinPercentage" -> minBinPercentage.toString,
+      "maxBins" -> maxBins.toString,
+      "seed" -> seed.toString
+    )
+
+  def flatRead[A: FlatReader]: A => Option[Any] = FlatReader[A].readMdlRecord(name)
+  def flatWriter[A](implicit fw: FlatWriter[A]): Option[MDLRecord[T]] => fw.IF =
+    (v: Option[MDLRecord[T]]) =>
+      fw.writeMdlRecord(name)(v.map(r => MDLRecord(r.label.toString, r.value)))
 }

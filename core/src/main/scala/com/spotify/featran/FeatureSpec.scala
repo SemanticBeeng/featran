@@ -17,13 +17,12 @@
 
 package com.spotify.featran
 
-import java.io._
-
+import com.spotify.featran.converters.{CaseClassConverter, DefaultTransform}
 import com.spotify.featran.transformers.{Settings, Transformer}
 
-import scala.collection.mutable
-import scala.language.{higherKinds, implicitConversions}
+import scala.collection.{breakOut, mutable}
 import scala.reflect.ClassTag
+import scala.reflect.runtime.universe.TypeTag
 
 /**
  * Companion object for [[FeatureSpec]].
@@ -31,6 +30,16 @@ import scala.reflect.ClassTag
 object FeatureSpec {
 
   private[featran] type ARRAY = Array[Option[Any]]
+
+  /**
+   * Generates a new [[FeatureSpec]] for case class of type `T`.  This method
+   * defaults the transformers based on the types of the fields.
+   *
+   * The implicit parameter can be used to change the default of the Transformer used for
+   * continuous values.  When another isn't suppilied Identity will be used.
+   */
+  def from[T <: Product: ClassTag: TypeTag](implicit dt: DefaultTransform[Double]): FeatureSpec[T] =
+    CaseClassConverter.toSpec[T]
 
   /**
    * Create a new [[FeatureSpec]] for input record type `T`.
@@ -54,6 +63,8 @@ object FeatureSpec {
 class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feature[T, _, _, _]],
                                        private[featran] val crossings: Crossings) {
 
+  private def featureSet: FeatureSet[T] = new FeatureSet[T](features, crossings)
+
   /**
    * Add a required field specification.
    * @param f function to extract feature `A` from record `T`
@@ -70,8 +81,8 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * @param t [[com.spotify.featran.transformers.Transformer Transformer]] for extracted feature `A`
    * @tparam A extracted feature type
    */
-  def optional[A](f: T => Option[A], default: Option[A] = None)
-                 (t: Transformer[A, _, _]): FeatureSpec[T] =
+  def optional[A](f: T => Option[A], default: Option[A] = None)(
+    t: Transformer[A, _, _]): FeatureSpec[T] =
     new FeatureSpec[T](this.features :+ new Feature(f, default, t), this.crossings)
 
   /**
@@ -80,7 +91,8 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * @param f function to cross feature value pairs
    */
   def cross(k: (String, String))(f: (Double, Double) => Double): FeatureSpec[T] = {
-    val names: Set[String] = features.map(_.transformer.name)(scala.collection.breakOut)
+    val names: Set[String] =
+      features.map(_.transformer.name)(scala.collection.breakOut)
     val d = Set(k._1, k._2).diff(names)
     require(d.isEmpty, s"Feature ${d.mkString(", ")} not found")
     new FeatureSpec[T](this.features, this.crossings + (k -> f))
@@ -95,7 +107,7 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * @tparam S input record type of the other spec
    */
   def compose[S](spec: FeatureSpec[S])(f: T => S): FeatureSpec[T] = {
-    val composedFeatures = spec.features.map{feature =>
+    val composedFeatures = spec.features.map { feature =>
       val t = feature.transformer.asInstanceOf[Transformer[Any, _, _]]
       new Feature(f.andThen(feature.f), feature.default, t)
     }
@@ -110,8 +122,53 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * @param input input collection
    * @tparam M input collection type, e.g. `Array`, `List`
    */
-  def extract[M[_]: CollectionType](input: M[T]): FeatureExtractor[M, T] =
-    new FeatureExtractor[M, T](new FeatureSet[T](features, crossings), input, None)
+  def extract[M[_]: CollectionType](input: M[T]): FeatureExtractor[M, T] = {
+    import CollectionType.ops._
+
+    val fs = input.pure(featureSet)
+    new FeatureExtractor[M, T](fs, input, None)
+  }
+
+  /**
+   * Creates a new FeatureSpec with only the features that respect the given predicate.
+   *
+   * @param predicate Function determining whether or not to include the feature
+   */
+  def filter(predicate: Feature[T, _, _, _] => Boolean): FeatureSpec[T] = {
+    val filteredFeatures = features.filter(predicate)
+    val featuresByName =
+      filteredFeatures.map[(String, Feature[T, _, _, _]), Map[String, Feature[T, _, _, _]]](f =>
+        f.transformer.name -> f)(breakOut)
+    val filteredCrossings = crossings.filter[T](featuresByName.contains)
+
+    new FeatureSpec[T](filteredFeatures, filteredCrossings)
+  }
+
+  /**
+   * Extract features from an input collection using a partial settings from a previous session.
+   *
+   * This bypasses the `reduce` step in [[extract]] and uses feature summary from settings exported
+   * in a previous session.
+   * @param input input collection
+   * @param settings JSON settings from a previous session
+   * @tparam M input collection type, e.g. `Array`, `List`
+   */
+  def extractWithSubsetSettings[M[_]: CollectionType](
+    input: M[T],
+    settings: M[String]): FeatureExtractor[M, T] = {
+    import json._
+    import CollectionType.ops._
+
+    val featureSet = settings.map { s =>
+      val settingsJson = decode[Seq[Settings]](s).right.get
+      val predicate: Feature[T, _, _, _] => Boolean =
+        f => settingsJson.exists(x => x.name == f.transformer.name)
+
+      filter(predicate).featureSet
+    }
+
+    new FeatureExtractor[M, T](featureSet, input, Some(settings))
+  }
 
   /**
    * Extract features from an input collection using settings from a previous session.
@@ -122,9 +179,32 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * @param settings JSON settings from a previous session
    * @tparam M input collection type, e.g. `Array`, `List`
    */
-  def extractWithSettings[M[_]: CollectionType](input: M[T], settings: M[String])
-  : FeatureExtractor[M, T] =
-    new FeatureExtractor[M, T](new FeatureSet[T](features, crossings), input, Some(settings))
+  def extractWithSettings[M[_]: CollectionType](input: M[T],
+                                                settings: M[String]): FeatureExtractor[M, T] = {
+    import CollectionType.ops._
+
+    val fs = input.pure(featureSet)
+    new FeatureExtractor[M, T](fs, input, Some(settings))
+  }
+
+  /**
+   * Extract features from individual records using partial settings. Since the
+   * settings are parsed only once, this is more efficient and is recommended when the input is
+   * from an unbounded source, e.g. a stream of events or a backend service.
+   *
+   * This bypasses the `reduce` step in [[extract]] and uses feature summary from settings exported
+   * in a previous session.
+   * @param settings JSON settings from a previous session
+   */
+  def extractWithSubsetSettings[F: FeatureBuilder: ClassTag](
+    settings: String): RecordExtractor[T, F] = {
+    import json._
+
+    val s = decode[Seq[Settings]](settings).right.get
+    val predicate: Feature[T, _, _, _] => Boolean = f => s.exists(x => x.name == f.transformer.name)
+
+    new RecordExtractor[T, F](filter(predicate).featureSet, settings)
+  }
 
   /**
    * Extract features from individual records using settings from a previous session. Since the
@@ -135,7 +215,7 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
    * in a previous session.
    * @param settings JSON settings from a previous session
    */
-  def extractWithSettings[F: FeatureBuilder : ClassTag](settings: String): RecordExtractor[T, F] =
+  def extractWithSettings[F: FeatureBuilder: ClassTag](settings: String): RecordExtractor[T, F] =
     new RecordExtractor[T, F](new FeatureSet[T](features, crossings), settings)
 
 }
@@ -143,7 +223,7 @@ class FeatureSpec[T] private[featran] (private[featran] val features: Array[Feat
 private class Feature[T, A, B, C](val f: T => Option[A],
                                   val default: Option[A],
                                   val transformer: Transformer[A, B, C])
-  extends Serializable {
+    extends Serializable {
 
   def get(t: T): Option[A] = f(t).orElse(default)
 
@@ -154,10 +234,11 @@ private class Feature[T, A, B, C](val f: T => Option[A],
   // (Option[B], Option[B]) => Option[B]
   def unsafeSum(x: Option[Any], y: Option[Any]): Option[Any] =
     (x.asInstanceOf[Option[B]], y.asInstanceOf[Option[B]]) match {
-      case (Some(a), Some(b)) => Some(transformer.aggregator.semigroup.plus(a, b))
+      case (Some(a), Some(b)) =>
+        Some(transformer.aggregator.semigroup.plus(a, b))
       case (Some(a), None) => Some(a)
       case (None, Some(b)) => Some(b)
-      case _ => None
+      case _               => None
     }
 
   // Option[B] => Option[C]
@@ -177,24 +258,25 @@ private class Feature[T, A, B, C](val f: T => Option[A],
     transformer.optBuildFeatures(a.asInstanceOf[Option[A]], c.asInstanceOf[Option[C]], fb)
 
   // Option[C]
-  def unsafeSettings(c: Option[Any]): Settings = transformer.settings(c.asInstanceOf[Option[C]])
+  def unsafeSettings(c: Option[Any]): Settings =
+    transformer.settings(c.asInstanceOf[Option[C]])
 
 }
 
-private class FeatureSet[T](private val features: Array[Feature[T, _, _, _]],
+private class FeatureSet[T](private[featran] val features: Array[Feature[T, _, _, _]],
                             private[featran] val crossings: Crossings)
-  extends Serializable {
+    extends Serializable {
 
   {
-    val (_, dups) = features
-      .foldLeft((Set.empty[String], Set.empty[String])) { case ((u, d), f) =>
+    val (_, dups) = features.foldLeft((Set.empty[String], Set.empty[String])) {
+      case ((u, d), f) =>
         val n = f.transformer.name
         if (u.contains(n)) {
           (u, d + n)
         } else {
           (u + n, d)
         }
-      }
+    }
     require(dups.isEmpty, "duplicate transformer names: " + dups.mkString(", "))
   }
 
@@ -258,8 +340,9 @@ private class FeatureSet[T](private val features: Array[Feature[T, _, _, _]],
       }
       i += 1
     }
-    crossings.map.keys.foreach { case (n1, n2) =>
-      sum += m(n1) * m(n2)
+    crossings.map.keys.foreach {
+      case (n1, n2) =>
+        sum += m(n1) * m(n2)
     }
     sum
   }
@@ -280,10 +363,14 @@ private class FeatureSet[T](private val features: Array[Feature[T, _, _, _]],
       }
       i += 1
     }
-    crossings.map.keys.foreach { case (n1, n2) =>
-      for (x <- m(n1); y <- m(n2)) {
-        b += Crossings.name(x, y)
-      }
+    crossings.map.keys.foreach {
+      case (n1, n2) =>
+        for {
+          x <- m(n1)
+          y <- m(n2)
+        } {
+          b += Crossings.name(x, y)
+        }
     }
     b.result()
   }
@@ -314,7 +401,8 @@ private class FeatureSet[T](private val features: Array[Feature[T, _, _, _]],
   }
 
   def decodeAggregators(s: Seq[Settings]): ARRAY = {
-    val m: Map[String, Settings] = s.map(x => (x.name, x))(scala.collection.breakOut)
+    val m: Map[String, Settings] =
+      s.map(x => (x.name, x))(scala.collection.breakOut)
     features.map { feature =>
       val name = feature.transformer.name
       require(m.contains(name), s"Missing settings for $name")
@@ -327,24 +415,18 @@ private class FeatureSet[T](private val features: Array[Feature[T, _, _, _]],
 private class MultiFeatureSet[T](features: Array[Feature[T, _, _, _]],
                                  crossings: Crossings,
                                  private val mapping: Map[String, Int])
-  extends FeatureSet[T](features, crossings) {
+    extends FeatureSet[T](features, crossings)
+    with Serializable {
 
   import FeatureSpec.ARRAY
 
   private val dims = mapping.values.toSet.size
 
-  def multiFeatureBuilders[F](fb: FeatureBuilder[F]): Array[FeatureBuilder[F]] = {
+  def multiFeatureBuilders[F: FeatureBuilder]: Array[FeatureBuilder[F]] =
     // each underlying FeatureSpec should get a unique copy of FeatureBuilder
-    val buffer = new ByteArrayOutputStream()
-    val out = new ObjectOutputStream(buffer)
-    out.writeObject(fb)
-    val bytes = buffer.toByteArray
     Array.fill(dims) {
-      val in = new ObjectInputStream(new ByteArrayInputStream(bytes))
-      val clone = in.readObject().asInstanceOf[FeatureBuilder[F]]
-      CrossingFeatureBuilder(clone, crossings)
+      CrossingFeatureBuilder(FeatureBuilder[F].newBuilder, crossings)
     }
-  }
 
   // Array[Option[C]] => Array[String]
   def multiFeatureNames(c: ARRAY): Seq[Seq[String]] = {
@@ -366,10 +448,14 @@ private class MultiFeatureSet[T](features: Array[Feature[T, _, _, _]],
     var idx = 0
     while (idx < dims) {
       val m = maps(idx).withDefaultValue(Nil)
-      crossings.map.keys.foreach { case (n1, n2) =>
-        for (x <- m(n1); y <- m(n2)) {
-          bs(idx) += Crossings.name(x, y)
-        }
+      crossings.map.keys.foreach {
+        case (n1, n2) =>
+          for {
+            x <- m(n1)
+            y <- m(n2)
+          } {
+            bs(idx) += Crossings.name(x, y)
+          }
       }
       idx += 1
     }
@@ -396,8 +482,9 @@ private class MultiFeatureSet[T](features: Array[Feature[T, _, _, _]],
     var idx = 0
     while (idx < dims) {
       val m = maps(idx).withDefaultValue(0)
-      crossings.map.keys.foreach { case (n1, n2) =>
-        sums(idx) += m(n1) * m(n2)
+      crossings.map.keys.foreach {
+        case (n1, n2) =>
+          sums(idx) += m(n1) * m(n2)
       }
       idx += 1
     }

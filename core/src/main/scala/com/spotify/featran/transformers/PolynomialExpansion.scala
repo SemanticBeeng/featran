@@ -17,7 +17,7 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.{FeatureBuilder, FeatureRejection}
+import com.spotify.featran.{FeatureBuilder, FeatureRejection, FlatReader, FlatWriter}
 import com.twitter.algebird.Aggregator
 
 /**
@@ -29,14 +29,27 @@ import com.twitter.algebird.Aggregator
  * When using aggregated feature summary from a previous session, vectors of different dimensions
  * are transformed to zero vectors and [[FeatureRejection.WrongDimension]] rejections are reported.
  */
-object PolynomialExpansion {
+object PolynomialExpansion extends SettingsBuilder {
+
   /**
    * Create a new [[PolynomialExpansion]] instance.
    * @param degree the polynomial degree to expand, which should be greater than or equal to 1
    * @param expectedLength expected length of the input vectors, or 0 to infer from data
    */
-  def apply(name: String, degree: Int = 2, expectedLength: Int = 0)
-  : Transformer[Array[Double], Int, Int] = new PolynomialExpansion(name, degree, expectedLength)
+  def apply(name: String,
+            degree: Int = 2,
+            expectedLength: Int = 0): Transformer[Array[Double], Int, Int] =
+    new PolynomialExpansion(name, degree, expectedLength)
+
+  /**
+   * Create a new [[PolynomialExpansion]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Array[Double], Int, Int] = {
+    val degree = setting.params("degree").toInt
+    val expectedLength = setting.params("expectedLength").toInt
+    PolynomialExpansion(setting.name, degree, expectedLength)
+  }
 
   def expand(v: Array[Double], degree: Int): Array[Double] = {
     val n = v.length
@@ -81,30 +94,34 @@ object PolynomialExpansion {
   }
 }
 
-private class PolynomialExpansion(name: String, val degree: Int, val expectedLength: Int)
-  extends Transformer[Array[Double], Int, Int](name) {
+private[featran] class PolynomialExpansion(name: String, val degree: Int, val expectedLength: Int)
+    extends Transformer[Array[Double], Int, Int](name) {
   require(degree >= 1, "degree must be >= 1")
   override val aggregator: Aggregator[Array[Double], Int, Int] =
     Aggregators.seqLength(expectedLength)
-  override def featureDimension(c: Int): Int = PolynomialExpansion.getPolySize(c, degree) - 1
+  override def featureDimension(c: Int): Int =
+    PolynomialExpansion.getPolySize(c, degree) - 1
   override def featureNames(c: Int): Seq[String] = names(featureDimension(c))
-  override def buildFeatures(a: Option[Array[Double]], c: Int,
-                             fb: FeatureBuilder[_]): Unit = a match {
-    case Some(x) =>
-      if (x.length != c) {
-        fb.skip(featureDimension(c))
-        fb.reject(this, FeatureRejection.WrongDimension(c, x.length))
-      } else {
-        val data = PolynomialExpansion.expand(x, degree)
-        fb.add(names(featureDimension(c)), data)
-      }
-    case None => fb.skip(featureDimension(c))
-  }
+  override def buildFeatures(a: Option[Array[Double]], c: Int, fb: FeatureBuilder[_]): Unit =
+    a match {
+      case Some(x) =>
+        if (x.length != c) {
+          fb.skip(featureDimension(c))
+          fb.reject(this, FeatureRejection.WrongDimension(c, x.length))
+        } else {
+          val data = PolynomialExpansion.expand(x, degree)
+          fb.add(names(featureDimension(c)), data)
+        }
+      case None => fb.skip(featureDimension(c))
+    }
   override def encodeAggregator(c: Int): String = c.toString
   override def decodeAggregator(s: String): Int = s.toInt
-  override def params: Map[String, String] = Map(
-    "degree" -> degree.toString,
-    "expectedLength" -> expectedLength.toString)
+  override def params: Map[String, String] =
+    Map("degree" -> degree.toString, "expectedLength" -> expectedLength.toString)
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readDoubleArray(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Array[Double]] => fw.IF =
+    fw.writeDoubleArray(name)
 }
 
 // Ported from commons-math3
@@ -283,7 +300,7 @@ private object CombinatoricsUtils {
   }
 
   @inline
-  def abs(x: Int): Int =  (x ^ (~(x >>> 31) + 1)) + (x >>> 31)
+  def abs(x: Int): Int = (x ^ (~(x >>> 31) + 1)) + (x >>> 31)
 
   private def checkBinomial(n: Int, k: Int): Unit = {
     require(n >= k, s"must have n >= k for binomial coefficient (n, k), got k = $k, n = $n")

@@ -17,7 +17,7 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
 import com.twitter.algebird.{Aggregator, Moments}
 
 /**
@@ -27,7 +27,8 @@ import com.twitter.algebird.{Aggregator, Moments}
  *
  * Missing values are transformed to 0.0 if `withMean` is true or population mean otherwise.
  */
-object StandardScaler {
+object StandardScaler extends SettingsBuilder {
+
   /**
    * Create a new [[StandardScaler]] instance.
    * @param withStd whether to scale the data to unit standard deviation
@@ -37,29 +38,44 @@ object StandardScaler {
             withStd: Boolean = true,
             withMean: Boolean = false): Transformer[Double, Moments, (Double, Double)] =
     new StandardScaler(name, withStd, withMean)
+
+  /**
+   * Create a new [[StandardScaler]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Double, Moments, (Double, Double)] = {
+    val withStd = setting.params("withStd").toBoolean
+    val withMean = setting.params("withMean").toBoolean
+    StandardScaler(setting.name, withStd, withMean)
+  }
 }
 
-private class StandardScaler(name: String, val withStd: Boolean, val withMean: Boolean)
-  extends OneDimensional[Double, Moments, (Double, Double)](name) {
+private[featran] class StandardScaler(name: String, val withStd: Boolean, val withMean: Boolean)
+    extends OneDimensional[Double, Moments, (Double, Double)](name) {
   override val aggregator: Aggregator[Double, Moments, (Double, Double)] =
     Aggregators.from[Double](Moments(_)).to(r => (r.mean, r.stddev))
-  override def buildFeatures(a: Option[Double], c: (Double, Double),
-                             fb: FeatureBuilder[_]): Unit = a match {
-    case Some(x) =>
-      val r = (withStd, withMean) match {
-        case (true, true) => (x - c._1) / c._2
-        case (true, false) => (x - c._1) / c._2 + c._1
-        case (false, true) => x - c._1
-        case (false, false) => x
-      }
-      fb.add(name, r)
-    case None => fb.add(name, if (withMean) 0.0 else c._1)
-  }
-  override def encodeAggregator(c: (Double, Double)): String = s"${c._1},${c._2}"
+  override def buildFeatures(a: Option[Double], c: (Double, Double), fb: FeatureBuilder[_]): Unit =
+    a match {
+      case Some(x) =>
+        val r = (withStd, withMean) match {
+          case (true, true)   => (x - c._1) / c._2
+          case (true, false)  => (x - c._1) / c._2 + c._1
+          case (false, true)  => x - c._1
+          case (false, false) => x
+        }
+        fb.add(name, r)
+      case None => fb.add(name, if (withMean) 0.0 else c._1)
+    }
+  override def encodeAggregator(c: (Double, Double)): String =
+    s"${c._1},${c._2}"
   override def decodeAggregator(s: String): (Double, Double) = {
     val t = s.split(",")
     (t(0).toDouble, t(1).toDouble)
   }
   override def params: Map[String, String] =
     Map("withStd" -> withStd.toString, "withMean" -> withMean.toString)
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readDouble(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Double] => fw.IF =
+    fw.writeDouble(name)
 }

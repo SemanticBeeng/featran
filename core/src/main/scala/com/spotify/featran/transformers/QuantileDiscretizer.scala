@@ -19,7 +19,7 @@ package com.spotify.featran.transformers
 
 import java.util.{TreeMap => JTreeMap}
 
-import com.spotify.featran.{FeatureBuilder, FeatureRejection}
+import com.spotify.featran.{FeatureBuilder, FeatureRejection, FlatReader, FlatWriter}
 import com.twitter.algebird._
 
 import scala.collection.JavaConverters._
@@ -37,46 +37,58 @@ import scala.collection.JavaConverters._
  * `[min, max]` are binned into the first or last bucket and [[FeatureRejection.OutOfBound]]
  * rejections are reported.
  */
-object QuantileDiscretizer {
+object QuantileDiscretizer extends SettingsBuilder {
+
   /**
    * Create a new [[QuantileDiscretizer]] instance.
    * @param numBuckets number of buckets (quantiles, or categories) into which data points are
    *                   grouped, must be greater than or equal to 2
    * @param k precision of the underlying Algebird QTree approximation
    */
-  def apply(name: String, numBuckets: Int = 2, k: Int = QTreeAggregator.DefaultK)
-  : Transformer[Double, B, C] =
+  def apply(name: String,
+            numBuckets: Int = 2,
+            k: Int = QTreeAggregator.DefaultK): Transformer[Double, B, C] =
     new QuantileDiscretizer(name, numBuckets, k)
+
+  /**
+   * Create a new [[QuantileDiscretizer]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Double, B, C] = {
+    val numBuckets = setting.params("numBuckets").toInt
+    val k = setting.params("k").toInt
+    QuantileDiscretizer(setting.name, numBuckets, k)
+  }
 
   private type B = (QTree[Double], Min[Double], Max[Double])
   private type C = (JTreeMap[Double, Int], Double, Double)
 }
 
-private class QuantileDiscretizer(name: String, val numBuckets: Int, val k: Int)
-  extends Transformer[Double, QuantileDiscretizer.B, QuantileDiscretizer.C](name) {
+private[featran] class QuantileDiscretizer(name: String, val numBuckets: Int, val k: Int)
+    extends Transformer[Double, QuantileDiscretizer.B, QuantileDiscretizer.C](name) {
   require(numBuckets >= 2, "numBuckets must be >= 2")
 
   import QuantileDiscretizer.{B, C}
   implicit val sg = new QTreeSemigroup[Double](k)
 
   override val aggregator: Aggregator[Double, B, C] =
-    Aggregators.from[Double](x => (QTree(x), Min(x), Max(x))).to { case (qt, min, max) =>
-      val m = new JTreeMap[Double, Int]()  // upper bound -> offset
-      val interval = 1.0 / numBuckets
-      for (i <- 1 until numBuckets) {
-        val (l, u) = qt.quantileBounds(interval * i)
-        val k = l / 2 + u / 2 // (l + u) might overflow
-        if (!m.containsKey(k)) { // in case of too few distinct values
-          m.put(k, i - 1)
+    Aggregators.from[Double](x => (QTree(x), Min(x), Max(x))).to {
+      case (qt, min, max) =>
+        val m = new JTreeMap[Double, Int]() // upper bound -> offset
+        val interval = 1.0 / numBuckets
+        for (i <- 1 until numBuckets) {
+          val (l, u) = qt.quantileBounds(interval * i)
+          val k = l / 2 + u / 2 // (l + u) might overflow
+          if (!m.containsKey(k)) { // in case of too few distinct values
+            m.put(k, i - 1)
+          }
         }
-      }
-      m.put(qt.upperBound, numBuckets - 1)
-      (m, min.get, max.get)
+        m.put(qt.upperBound, numBuckets - 1)
+        (m, min.get, max.get)
     }
   override def featureDimension(c: C): Int = numBuckets
   override def featureNames(c: C): Seq[String] = names(numBuckets)
-  override def buildFeatures(a: Option[Double], c: C,
-                             fb: FeatureBuilder[_]): Unit = a match {
+  override def buildFeatures(a: Option[Double], c: C, fb: FeatureBuilder[_]): Unit = a match {
     case Some(x) =>
       val (m, min, max) = c
       val e = m.higherEntry(x)
@@ -106,4 +118,8 @@ private class QuantileDiscretizer(name: String, val numBuckets: Int, val k: Int)
   }
   override def params: Map[String, String] =
     Map("numBuckets" -> numBuckets.toString, "k" -> k.toString)
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readDouble(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Double] => fw.IF =
+    fw.writeDouble(name)
 }

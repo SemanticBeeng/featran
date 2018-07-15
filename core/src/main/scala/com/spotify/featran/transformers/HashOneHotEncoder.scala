@@ -17,7 +17,7 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
 import com.twitter.algebird._
 
 import scala.math.ceil
@@ -53,7 +53,8 @@ import scala.util.hashing.MurmurHash3
  *              4096      0.0071%
  * }}}
  */
-object HashOneHotEncoder {
+object HashOneHotEncoder extends SettingsBuilder {
+
   /**
    * Create a new [[HashOneHotEncoder]] instance.
    * @param hashBucketSize number of buckets, or 0 to infer from data with HyperLogLog
@@ -63,10 +64,22 @@ object HashOneHotEncoder {
             hashBucketSize: Int = 0,
             sizeScalingFactor: Double = 8.0): Transformer[String, HLL, Int] =
     new HashOneHotEncoder(name, hashBucketSize, sizeScalingFactor)
+
+  /**
+   * Create a new [[HashOneHotEncoder]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[String, HLL, Int] = {
+    val hashBucketSize = setting.params("hashBucketSize").toInt
+    val sizeScalingFactor = setting.params("sizeScalingFactor").toDouble
+    HashOneHotEncoder(setting.name, hashBucketSize, sizeScalingFactor)
+  }
 }
 
-private class HashOneHotEncoder(name: String, hashBucketSize: Int, sizeScalingFactor: Double)
-  extends BaseHashHotEncoder[String](name, hashBucketSize, sizeScalingFactor) {
+private[featran] class HashOneHotEncoder(name: String,
+                                         hashBucketSize: Int,
+                                         sizeScalingFactor: Double)
+    extends BaseHashHotEncoder[String](name, hashBucketSize, sizeScalingFactor) {
   override def prepare(a: String): HLL = hllMonoid.toHLL(a)
 
   override def buildFeatures(a: Option[String], c: Int, fb: FeatureBuilder[_]): Unit = {
@@ -80,12 +93,16 @@ private class HashOneHotEncoder(name: String, hashBucketSize: Int, sizeScalingFa
         fb.skip(c)
     }
   }
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readString(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[String] => fw.IF =
+    fw.writeString(name)
 }
 
-private abstract class BaseHashHotEncoder[A](name: String,
-                                             val hashBucketSize: Int,
-                                             val sizeScalingFactor: Double)
-  extends Transformer[A, HLL, Int](name) {
+private[featran] abstract class BaseHashHotEncoder[A](name: String,
+                                                      val hashBucketSize: Int,
+                                                      val sizeScalingFactor: Double)
+    extends Transformer[A, HLL, Int](name) {
   require(hashBucketSize >= 0, "hashBucketSize must be >= 0")
   require(sizeScalingFactor >= 1.0, "hashBucketSize must be >= 1.0")
 
@@ -101,7 +118,8 @@ private abstract class BaseHashHotEncoder[A](name: String,
       // dummy aggregator
       new Aggregator[A, HLL, Int] {
         override def prepare(input: A): HLL = SparseHLL(4, Map.empty)
-        override def semigroup: Semigroup[HLL] = Semigroup.from[HLL]((x, _) => x)
+        override def semigroup: Semigroup[HLL] =
+          Semigroup.from[HLL]((x, _) => x)
         override def present(reduction: HLL): Int = hashBucketSize
       }
     }
@@ -110,9 +128,9 @@ private abstract class BaseHashHotEncoder[A](name: String,
 
   override def encodeAggregator(c: Int): String = c.toString
   override def decodeAggregator(s: String): Int = s.toInt
-  override def params: Map[String, String] = Map(
-    "hashBucketSize" -> hashBucketSize.toString,
-    "sizeScalingFactor" -> sizeScalingFactor.toString)
+  override def params: Map[String, String] =
+    Map("hashBucketSize" -> hashBucketSize.toString,
+        "sizeScalingFactor" -> sizeScalingFactor.toString)
 }
 
 private object HashEncoder {

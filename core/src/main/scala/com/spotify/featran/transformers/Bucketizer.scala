@@ -19,8 +19,8 @@ package com.spotify.featran.transformers
 
 import java.util.{TreeMap => JTreeMap}
 
-import com.spotify.featran.{FeatureBuilder, FeatureRejection}
-import com.twitter.algebird.Aggregator
+import com.spotify.featran.{FeatureBuilder, FeatureRejection, FlatReader, FlatWriter}
+import com.twitter.algebird.{Aggregator, HLL}
 
 /**
  * Transform a column of continuous features to n columns of feature buckets.
@@ -41,17 +41,29 @@ import com.twitter.algebird.Aggregator
  *
  * Missing values are transformed to zero vectors.
  */
-object Bucketizer {
+object Bucketizer extends SettingsBuilder {
+
   /**
    * Create a new [[Bucketizer]] instance.
    * @param splits parameter for mapping continuous features into buckets
    */
   def apply(name: String, splits: Array[Double]): Transformer[Double, Unit, Unit] =
     new Bucketizer(name, splits)
+
+  /**
+   * Create a new [[Bucketizer]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Double, Unit, Unit] = {
+    val params = setting.params
+    val str = params("splits")
+    val splits = str.slice(1, str.length - 1).split(",").map(_.toDouble).sorted
+    Bucketizer(setting.name, splits)
+  }
 }
 
-private class Bucketizer(name: String, val splits: Array[Double])
-  extends Transformer[Double, Unit, Unit](name) {
+private[featran] class Bucketizer(name: String, val splits: Array[Double])
+    extends Transformer[Double, Unit, Unit](name) {
   require(splits.length >= 3, "splits.length must be >= 3")
   private val lower = splits.head
   private val upper = splits.last
@@ -65,7 +77,8 @@ private class Bucketizer(name: String, val splits: Array[Double])
     }
     m
   }
-  override val aggregator: Aggregator[Double, Unit, Unit] = Aggregators.unit[Double]
+  override val aggregator: Aggregator[Double, Unit, Unit] =
+    Aggregators.unit[Double]
   override def featureDimension(c: Unit): Int = splits.length - 1
   override def featureNames(c: Unit): Seq[String] = names(splits.length - 1)
   override def buildFeatures(a: Option[Double], c: Unit, fb: FeatureBuilder[_]): Unit = a match {
@@ -85,5 +98,10 @@ private class Bucketizer(name: String, val splits: Array[Double])
 
   override def encodeAggregator(c: Unit): String = ""
   override def decodeAggregator(s: String): Unit = ()
-  override def params: Map[String, String] = Map("splits" -> splits.mkString("[", ",", "]"))
+  override def params: Map[String, String] =
+    Map("splits" -> splits.mkString("[", ",", "]"))
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readDouble(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Double] => fw.IF =
+    fw.writeDouble(name)
 }

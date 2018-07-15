@@ -17,7 +17,7 @@
 
 package com.spotify.featran.transformers
 
-import com.spotify.featran.FeatureBuilder
+import com.spotify.featran.{FeatureBuilder, FlatReader, FlatWriter}
 import com.twitter.algebird.HLL
 
 import scala.collection.SortedSet
@@ -52,7 +52,8 @@ import scala.collection.SortedSet
  *              4096      0.0071%
  * }}}
  */
-object HashNHotEncoder {
+object HashNHotEncoder extends SettingsBuilder {
+
   /**
    * Create a new [[HashNHotEncoder]] instance.
    * @param hashBucketSize number of buckets, or 0 to infer from data with HyperLogLog
@@ -62,26 +63,40 @@ object HashNHotEncoder {
             hashBucketSize: Int = 0,
             sizeScalingFactor: Double = 8.0): Transformer[Seq[String], HLL, Int] =
     new HashNHotEncoder(name, hashBucketSize, sizeScalingFactor)
+
+  /**
+   * Create a new [[HashNHotEncoder]] from a settings object
+   * @param setting Settings object
+   */
+  def fromSettings(setting: Settings): Transformer[Seq[String], HLL, Int] = {
+    val hashBucketSize = setting.params("hashBucketSize").toInt
+    val sizeScalingFactor = setting.params("sizeScalingFactor").toDouble
+    HashNHotEncoder(setting.name, hashBucketSize, sizeScalingFactor)
+  }
 }
 
-private class HashNHotEncoder(name: String, hashBucketSize: Int, sizeScalingFactor: Double)
-  extends BaseHashHotEncoder[Seq[String]](name, hashBucketSize, sizeScalingFactor) {
-  override def prepare(a: Seq[String]): HLL = a.map(hllMonoid.toHLL(_)).reduce(hllMonoid.plus)
+private[featran] class HashNHotEncoder(name: String, hashBucketSize: Int, sizeScalingFactor: Double)
+    extends BaseHashHotEncoder[Seq[String]](name, hashBucketSize, sizeScalingFactor) {
+  override def prepare(a: Seq[String]): HLL =
+    a.map(hllMonoid.toHLL(_)).reduce(hllMonoid.plus)
 
   override def buildFeatures(a: Option[Seq[String]], c: Int, fb: FeatureBuilder[_]): Unit = {
     a match {
       case Some(xs) =>
         var prev = -1
-        SortedSet(xs.map(HashEncoder.bucket(_, c)): _*)
-          .foreach { curr =>
-            val gap = curr - prev - 1
-            if (gap > 0) fb.skip(gap)
-            fb.add(name + '_' + curr, 1.0)
-            prev = curr
-          }
+        SortedSet(xs.map(HashEncoder.bucket(_, c)): _*).foreach { curr =>
+          val gap = curr - prev - 1
+          if (gap > 0) fb.skip(gap)
+          fb.add(name + '_' + curr, 1.0)
+          prev = curr
+        }
         val gap = c - prev - 1
         if (gap > 0) fb.skip(gap)
       case None => fb.skip(c)
     }
   }
+
+  def flatRead[T: FlatReader]: T => Option[Any] = FlatReader[T].readStrings(name)
+  def flatWriter[T](implicit fw: FlatWriter[T]): Option[Seq[String]] => fw.IF =
+    fw.writeStrings(name)
 }

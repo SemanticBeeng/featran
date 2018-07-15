@@ -21,6 +21,9 @@ import com.spotify.featran.CollectionType;
 import com.spotify.featran.FeatureBuilder;
 import com.spotify.featran.FeatureSpec;
 import com.spotify.featran.transformers.Transformer;
+import com.spotify.featran.xgboost.SparseLabeledPoint;
+import ml.dmlc.xgboost4j.LabeledPoint;
+import org.tensorflow.example.Example;
 import scala.Function1;
 import scala.Function2;
 import scala.Option;
@@ -139,6 +142,54 @@ public class JFeatureSpec<T> {
   public JRecordExtractor<T, DoubleSparseArray>
   extractWithSettingsDoubleSparseArray(String settings) {
     return new JRecordExtractor<>(JavaOps.extractWithSettingsDoubleSparseArray(self, settings));
+  }
+
+  /**
+   * Java wrapper for {@link FeatureSpec#extractWithSettings(String, FeatureBuilder, ClassTag)}.
+   */
+  public JRecordExtractor<T, FloatNamedSparseArray>
+  extractWithSettingsFloatNamedSparseArray(String settings) {
+    return new JRecordExtractor<>(JavaOps.extractWithSettingsFloatNamedSparseArray(self, settings));
+  }
+
+  /**
+   * Java wrapper for {@link FeatureSpec#extractWithSettings(String, FeatureBuilder, ClassTag).
+   */
+  public JRecordExtractor<T, DoubleNamedSparseArray>
+  extractWithSettingsDoubleNamedSparseArray(String settings) {
+    return new JRecordExtractor<>(
+            JavaOps.extractWithSettingsDoubleNamedSparseArray(self, settings));
+  }
+
+  /**
+   * Java wrapper for {@link FeatureSpec#extractWithSettings(String, FeatureBuilder, ClassTag).
+   */
+  public JRecordExtractor<T, Example>
+  extractWithSettingsExample(String settings) {
+    return new JRecordExtractor<>(JavaOps.extractWithSettingsExample(self, settings));
+  }
+
+  /**
+   * Java wrapper for {@link FeatureSpec#extractWithSettings(String, FeatureBuilder, ClassTag).
+   */
+  public JRecordExtractor<T, LabeledPoint>
+  extractWithSettingsLabeledPoint(String settings) {
+    return new JRecordExtractor<>(JavaOps.extractWithSettingsLabeledPoint(self, settings));
+  }
+
+  /**
+   * Java wrapper for {@link FeatureSpec#extractWithSettings(String, FeatureBuilder, ClassTag).
+   */
+  public JRecordExtractor<T, SparseLabeledPoint>
+  extractWithSettingsSparseLabeledPoint(String settings) {
+    return new JRecordExtractor<>(JavaOps.extractWithSettingsSparseLabeledPoint(self, settings));
+  }
+
+  /**
+   * Returns internal {@link FeatureSpec}.
+   */
+  public FeatureSpec<T> internal() {
+    return self;
   }
 
 }

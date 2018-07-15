@@ -18,7 +18,6 @@
 package com.spotify.featran
 
 import scala.reflect.ClassTag
-import scala.language.{higherKinds, implicitConversions}
 
 /**
  * Encapsulate features extracted from a [[MultiFeatureSpec]].
@@ -26,16 +25,14 @@ import scala.language.{higherKinds, implicitConversions}
  * @tparam M input collection type, e.g. `Array`, List
  * @tparam T input record type to extract features from
  */
-class MultiFeatureExtractor[M[_]: CollectionType, T] private[featran]
-(private val fs: MultiFeatureSet[T],
- @transient private val input: M[T],
- @transient private val settings: Option[M[String]])
-  extends Serializable {
+class MultiFeatureExtractor[M[_]: CollectionType, T] private[featran] (
+  private val fs: M[MultiFeatureSet[T]],
+  @transient private val input: M[T],
+  @transient private val settings: Option[M[String]])
+    extends Serializable {
+  import CollectionType.ops._
 
-  @transient private val dt: CollectionType[M] = implicitly[CollectionType[M]]
-  import dt.Ops._
-
-  private val extractor = new FeatureExtractor(fs, input, settings)
+  private val extractor = new FeatureExtractor(fs.asInstanceOf[M[FeatureSet[T]]], input, settings)
 
   /**
    * JSON settings of the [[MultiFeatureSpec]] and aggregated feature summary.
@@ -49,14 +46,15 @@ class MultiFeatureExtractor[M[_]: CollectionType, T] private[featran]
    * Names of the extracted features, in the same order as values in [[featureValues]].
    */
   @transient lazy val featureNames: M[Seq[Seq[String]]] =
-    extractor.aggregate.map(fs.multiFeatureNames)
+    extractor.aggregate.cross(fs).map(x => x._2.multiFeatureNames(x._1))
 
   /**
    * Values of the extracted features, in the same order as names in [[featureNames]].
    * @tparam F output data type, e.g. `Array[Float]`, `Array[Double]`, `DenseVector[Float]`,
    *           `DenseVector[Double]`
    */
-  def featureValues[F: FeatureBuilder : ClassTag]: M[Seq[F]] = featureResults.map(_._1)
+  def featureValues[F: FeatureBuilder: ClassTag]: M[Seq[F]] =
+    featureResults.map(_._1)
 
   /**
    * Values of the extracted features, in the same order as names in [[featureNames]] with
@@ -64,13 +62,17 @@ class MultiFeatureExtractor[M[_]: CollectionType, T] private[featran]
    * @tparam F output data type, e.g. `Array[Float]`, `Array[Double]`, `DenseVector[Float]`,
    *           `DenseVector[Double]`
    */
-  def featureResults[F: FeatureBuilder : ClassTag]
-  : M[(Seq[F], Seq[Map[String, FeatureRejection]], T)] = {
-    val fbs = fs.multiFeatureBuilders(implicitly[FeatureBuilder[F]])
-    extractor.as.cross(extractor.aggregate).map { case ((o, a), c) =>
-      fs.multiFeatureValues(a, c, fbs)
-      (fbs.map(_.result).toSeq, fbs.map(_.rejections), o)
-    }
+  def featureResults[F: FeatureBuilder: ClassTag]
+    : M[(Seq[F], Seq[Map[String, FeatureRejection]], T)] = {
+    extractor.as
+      .cross(extractor.aggregate)
+      .cross(fs)
+      .map {
+        case (((o, a), c), featureSet) =>
+          val fb = featureSet.multiFeatureBuilders
+          featureSet.multiFeatureValues(a, c, fb)
+          (fb.map(_.result).toSeq, fb.map(_.rejections), o)
+      }
   }
 
 }

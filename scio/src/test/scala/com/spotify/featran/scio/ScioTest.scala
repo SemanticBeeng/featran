@@ -20,6 +20,8 @@ package com.spotify.featran.scio
 import com.spotify.featran._
 import com.spotify.featran.transformers._
 import com.spotify.scio.testing._
+import com.spotify.featran.json._
+import com.spotify.scio.values.SCollection
 
 class ScioTest extends PipelineSpec {
 
@@ -27,19 +29,67 @@ class ScioTest extends PipelineSpec {
 
   "Scio" should "work with FeatureSpec" in {
     runWithContext { sc =>
-      val f = testSpec.extract(sc.parallelize(testData))
-      f.featureNames should containSingleValue (expectedNames)
-      f.featureValues[Seq[Double]] should containInAnyOrder (expectedValues)
+      val f = TestSpec.extract(sc.parallelize(TestData))
+      f.featureNames should containSingleValue(ExpectedNames)
+      f.featureValues[Seq[Double]] should containInAnyOrder(ExpectedValues)
     }
   }
 
   it should "work with MultiFeatureSpec" in {
     noException shouldBe thrownBy {
       runWithContext { sc =>
-        val f = recordSpec.extract(sc.parallelize(records))
+        val f = RecordSpec.extract(sc.parallelize(Records))
         f.featureNames
         f.featureValues[Seq[Double]]
       }
+    }
+  }
+
+  it should "work with FlatConverter on FeatureSpec" in {
+    runWithContext { sc =>
+      FlatConverter[(String, Int), String](TestSpec)
+        .convert(sc.parallelize(TestData))
+    }
+  }
+
+  it should "work with FlatConverter on MultiFeatureSpec" in {
+    noException shouldBe thrownBy {
+      runWithContext { sc =>
+        FlatConverter
+          .multiSpec[Record, String](RecordSpec)
+          .convert(sc.parallelize(Records))
+      }
+    }
+  }
+
+  it should "work with FlatExtractor on FeatureSpec" in {
+    runWithContext { sc =>
+      val json = FlatConverter[(String, Int), String](TestSpec)
+        .convert(sc.parallelize(TestData))
+      FlatExtractor.flatSpec(TestSpec).extract(json)
+    }
+  }
+
+  it should "work with FlatExtractor on MuiltiFeatureSpec" in {
+    runWithContext { sc =>
+      val json = FlatConverter
+        .multiSpec[Record, String](RecordSpec)
+        .convert(sc.parallelize(Records))
+      FlatExtractor.multiFlatSpec(RecordSpec).extract(json)
+    }
+  }
+
+  it should "work with FlatExtractor on Settings" in {
+    runWithContext { sc =>
+      val settings = TestSpec
+        .extract(sc.parallelize(TestData))
+        .featureSettings
+
+      val json = FlatConverter[(String, Int), String](TestSpec)
+        .convert(sc.parallelize(TestData))
+
+      FlatExtractor[SCollection, String](settings)
+        .featureValues[Seq[Double]](json) should containInAnyOrder(ExpectedValues)
     }
   }
 
@@ -49,13 +99,16 @@ class ScioTest extends PipelineSpec {
 
   // scalastyle:off no.whitespace.before.left.bracket
   it should "fail on serialization error" in {
-    runWithContext { sc =>
-      val foo = new NonSerializable()
-      val f = FeatureSpec.of[(String, Int)]
-        .required(e => foo.method(e._1))(Identity("foo"))
-        .extract(sc.parallelize(testData))
+    an[Exception] should be thrownBy {
+      runWithContext { sc =>
+        val foo = new NonSerializable()
+        val f = FeatureSpec
+          .of[(String, Int)]
+          .required(e => foo.method(e._1))(Identity("foo"))
+          .extract(sc.parallelize(TestData))
 
-      an [Exception] should be thrownBy f.featureValues[Seq[Double]]
+        f.featureValues[Seq[Double]]
+      }
     }
   }
   // scalastyle:on no.whitespace.before.left.bracket
