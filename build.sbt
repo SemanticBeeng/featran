@@ -17,6 +17,7 @@
 
 import com.typesafe.sbt.SbtGit.GitKeys.gitRemoteRepo
 import sbt.Def
+import sbtrelease.ReleaseStateTransformations._
 
 val algebirdVersion = "0.13.4"
 val breezeVersion = "1.0-RC2"
@@ -37,10 +38,11 @@ val shapelessDatatypeVersion = "0.1.9"
 
 val CompileTime = config("compile-time").hide
 
-val commonSettings = Seq(
+lazy val commonSettings = Seq(
   organization := "com.spotify",
   name := "featran",
   description := "Feature Transformers",
+  scalaVersion := "2.11.12",
   scalacOptions ++= commonScalacOptions,
   scalacOptions in (Compile, doc) ++= Seq("-skip-packages", "org.apache"),
   javacOptions ++= Seq("-source", "1.8", "-target", "1.8", "-Xlint:unchecked"),
@@ -54,7 +56,7 @@ val commonSettings = Seq(
   unmanagedClasspath in Compile ++= update.value.select(configurationFilter(CompileTime.name))
 )
 
-val publishSettings = Seq(
+lazy val publishSettings = Seq(
   credentials ++= (for {
     username <- sys.env.get("SONATYPE_USERNAME")
     password <- sys.env.get("SONATYPE_PASSWORD")
@@ -65,6 +67,19 @@ val publishSettings = Seq(
     else Opts.resolver.sonatypeStaging),
   releaseCrossBuild := true,
   releasePublishArtifactsAction := PgpKeys.publishSigned.value,
+  releaseProcess := Seq[ReleaseStep](
+    checkSnapshotDependencies,
+    inquireVersions,
+    runClean,
+    releaseStepCommandAndRemaining("+test"),
+    setReleaseVersion,
+    commitReleaseVersion,
+    tagRelease,
+    releaseStepCommandAndRemaining("+publishSigned"),
+    setNextVersion,
+    commitNextVersion,
+    pushChanges
+  ),
   publishMavenStyle := true,
   publishArtifact in Test := false,
   sonatypeProfileName := "com.spotify",
@@ -105,19 +120,20 @@ val publishSettings = Seq(
   )
 )
 
-val noPublishSettings = Seq(
+lazy val noPublishSettings = Seq(
   publish := {},
   publishLocal := {},
   publishArtifact := false
 )
 
+lazy val featranSettings = commonSettings ++ publishSettings
+
 lazy val root: Project = project
   .in(file("."))
   .enablePlugins(GhpagesPlugin, ScalaUnidocPlugin)
-  .settings(commonSettings)
-  .settings(noPublishSettings)
+  .settings(featranSettings)
   .settings(
-    scalaVersion := "2.11.12",
+    crossScalaVersions := Seq("2.11.12"),
     siteSubdirName in ScalaUnidoc := "api",
     addMappingsToSiteDir(mappings in (ScalaUnidoc, packageDoc), siteSubdirName in ScalaUnidoc),
     gitRemoteRepo := "git@github.com:spotify/featran.git",
@@ -143,14 +159,12 @@ lazy val root: Project = project
 
 lazy val core: Project = project
   .in(file("core"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-core"))
   .settings(
     name := "core",
     moduleName := "featran-core",
     description := "Feature Transformers",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     libraryDependencies ++= Seq(
       "com.twitter" %% "algebird-core" % algebirdVersion,
@@ -168,14 +182,12 @@ lazy val core: Project = project
 
 lazy val java: Project = project
   .in(file("java"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-java"))
   .settings(
     name := "java",
     moduleName := "featran-java",
     description := "Feature Transformers - java",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12"),
     libraryDependencies ++= Seq(
       "org.scalacheck" %% "scalacheck" % scalacheckVersion % "test",
@@ -192,14 +204,12 @@ lazy val java: Project = project
 
 lazy val flink: Project = project
   .in(file("flink"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-flink"))
   .settings(
     name := "flink",
     moduleName := "featran-flink",
     description := "Feature Transformers - Flink",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12"),
     libraryDependencies ++= Seq(
       "org.apache.flink" %% "flink-scala" % flinkVersion % "provided",
@@ -214,15 +224,13 @@ lazy val flink: Project = project
 
 lazy val scalding: Project = project
   .in(file("scalding"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-scalding"))
   .settings(
     name := "scalding",
     moduleName := "featran-scalding",
     description := "Feature Transformers - Scalding",
     resolvers += "Concurrent Maven Repo" at "http://conjars.org/repo",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     libraryDependencies ++= Seq(
       "com.twitter" %% "scalding-core" % scaldingVersion % "provided",
@@ -237,14 +245,12 @@ lazy val scalding: Project = project
 
 lazy val scio: Project = project
   .in(file("scio"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-scio"))
   .settings(
     name := "scio",
     moduleName := "featran-scio",
     description := "Feature Transformers - Scio",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     libraryDependencies ++= Seq(
       "com.spotify" %% "scio-core" % scioVersion % "provided",
@@ -258,14 +264,12 @@ lazy val scio: Project = project
 
 lazy val spark: Project = project
   .in(file("spark"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-spark"))
   .settings(
     name := "spark",
     moduleName := "featran-spark",
     description := "Feature Transformers - Spark",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12"),
     libraryDependencies ++= Seq(
       "org.apache.spark" %% "spark-core" % sparkVersion % "provided",
@@ -279,14 +283,12 @@ lazy val spark: Project = project
 
 lazy val numpy: Project = project
   .in(file("numpy"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-numpy"))
   .settings(
     name := "numpy",
     moduleName := "featran-numpy",
     description := "Feature Transformers - NumPy",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     libraryDependencies ++= Seq(
       "org.scalatest" %% "scalatest" % scalatestVersion % "test"
@@ -296,14 +298,12 @@ lazy val numpy: Project = project
 
 lazy val tensorflow: Project = project
   .in(file("tensorflow"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-tensorflow"))
   .settings(
     name := "tensorflow",
     moduleName := "featran-tensorflow",
     description := "Feature Transformers - TensorFlow",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     libraryDependencies ++= Seq(
       "org.tensorflow" % "proto" % tensorflowVersion,
@@ -318,14 +318,12 @@ lazy val tensorflow: Project = project
 
 lazy val xgboost: Project = project
   .in(file("xgboost"))
-  .settings(commonSettings)
-  .settings(publishSettings)
+  .settings(featranSettings)
   .settings(mimaSettings("featran-xgboost"))
   .settings(
     name := "xgboost",
     moduleName := "featran-xgboost",
     description := "Feature Transformers - XGBoost",
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12"),
     libraryDependencies ++= Seq(
       "me.lyh" % "xgboost4j" % xgBoostVersion % "provided",
@@ -339,11 +337,10 @@ lazy val xgboost: Project = project
 
 lazy val examples: Project = project
   .in(file("examples"))
-  .settings(commonSettings)
+  .settings(featranSettings)
   .settings(noPublishSettings)
   .settings(soccoSettings)
   .settings(
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     name := "examples",
     moduleName := "featran-examples",
@@ -357,10 +354,9 @@ lazy val examples: Project = project
 
 lazy val featranJmh: Project = project
   .in(file("jmh"))
-  .settings(commonSettings)
+  .settings(featranSettings)
   .settings(noPublishSettings)
   .settings(
-    scalaVersion := "2.11.12",
     crossScalaVersions := Seq("2.11.12", "2.12.6"),
     name := "jmh",
     description := "Featran JMH Microbenchmarks",
